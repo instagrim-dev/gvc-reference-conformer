@@ -233,6 +233,81 @@
         "conflicting_evidence": false,
         "counters": {"unverified_from_unrun_declared": 0, "degraded": 0, "producer_mint_rejected": 1, "unbindable_content_identity": 0, "same_chain_indeterminate": 0}
       }
+    },
+    {
+      "name": "unbindable_not_counted_at_unverified",
+      "input": {
+        "declared": [
+          {"tier": "constructed_check", "ran": true, "passed": true, "author": {"identity": "operator-1", "kind": "human", "chain_id": ""}, "content_identity": "sha:a"},
+          {"tier": "review_only", "ran": false, "passed": false, "author": {"identity": "reviewer-1", "kind": "human", "chain_id": ""}, "content_identity": ""}
+        ],
+        "work_producer": {"identity": "producer-1", "kind": "agent", "chain_id": "chain-1"},
+        "current_content_identity": "",
+        "same_tier_conflict": false
+      },
+      "expect": {
+        "effective_grade": "unverified",
+        "evidence_kind": "constructed_check",
+        "applied_rank_ops": ["unrun_declared_cap"],
+        "conflicting_evidence": false,
+        "counters": {"unverified_from_unrun_declared": 1, "degraded": 0, "producer_mint_rejected": 0, "unbindable_content_identity": 0, "same_chain_indeterminate": 0}
+      }
+    },
+    {
+      "name": "same_chain_indeterminate_below_cap_range",
+      "input": {
+        "declared": [
+          {"tier": "constructed_check", "ran": true, "passed": true, "author": {"identity": "agent-2", "kind": "agent", "chain_id": ""}, "content_identity": "sha:a"}
+        ],
+        "work_producer": {"identity": "producer-1", "kind": "agent", "chain_id": "chain-1"},
+        "current_content_identity": "sha:a",
+        "same_tier_conflict": false
+      },
+      "expect": {
+        "effective_grade": "constructed_check",
+        "evidence_kind": "constructed_check",
+        "applied_rank_ops": [],
+        "conflicting_evidence": false,
+        "counters": {"unverified_from_unrun_declared": 0, "degraded": 0, "producer_mint_rejected": 0, "unbindable_content_identity": 0, "same_chain_indeterminate": 0}
+      }
+    },
+    {
+      "name": "all_unrun_base_already_unverified",
+      "input": {
+        "declared": [
+          {"tier": "interop", "ran": false, "passed": false, "author": {"identity": "reviewer-1", "kind": "human", "chain_id": ""}, "content_identity": ""},
+          {"tier": "constructed_check", "ran": false, "passed": false, "author": {"identity": "operator-1", "kind": "human", "chain_id": ""}, "content_identity": ""}
+        ],
+        "work_producer": {"identity": "producer-1", "kind": "agent", "chain_id": "chain-1"},
+        "current_content_identity": "",
+        "same_tier_conflict": false
+      },
+      "expect": {
+        "effective_grade": "unverified",
+        "evidence_kind": "unverified",
+        "applied_rank_ops": [],
+        "conflicting_evidence": false,
+        "counters": {"unverified_from_unrun_declared": 0, "degraded": 0, "producer_mint_rejected": 0, "unbindable_content_identity": 0, "same_chain_indeterminate": 0}
+      }
+    },
+    {
+      "name": "agreeing_producer_mint_not_counted",
+      "input": {
+        "declared": [
+          {"tier": "constructed_check", "ran": true, "passed": true, "author": {"identity": "operator-1", "kind": "human", "chain_id": ""}, "content_identity": "sha:a"}
+        ],
+        "work_producer": {"identity": "producer-1", "kind": "agent", "chain_id": "chain-1"},
+        "current_content_identity": "sha:a",
+        "same_tier_conflict": false,
+        "producer_supplied_grade": "constructed_check"
+      },
+      "expect": {
+        "effective_grade": "constructed_check",
+        "evidence_kind": "constructed_check",
+        "applied_rank_ops": [],
+        "conflicting_evidence": false,
+        "counters": {"unverified_from_unrun_declared": 0, "degraded": 0, "producer_mint_rejected": 0, "unbindable_content_identity": 0, "same_chain_indeterminate": 0}
+      }
     }
   ]
 }
