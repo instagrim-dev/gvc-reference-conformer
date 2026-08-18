@@ -12,13 +12,17 @@ public CI, the two conformance obligations the spec defines:
 2. **Fixture projection** — an independent implementation of the derivation
    (JavaScript; shares no code with the spec's Python reference runner)
    executes every canonical derivation fixture and must match every
-   expected outcome (`conformer.mjs`).
+   expected outcome (`conformer.mjs`). Counted populations are compared
+   per canonical population through a declared injective total mapping
+   (this implementation uses the canonical spellings, so its mapping is
+   the identity), never by whole-structure equality — a canonical
+   population the mapping does not cover fails every case, and a
+   population a fixture does not name is expected to be zero.
 
-**Pre-publication state:** while the spec repository is private, the parity
-step fails closed in CI (HTTP 404 on the canonical artifacts) by design — a
-parity check that passes when it cannot see the producer certifies nothing.
-It goes green at the spec's visibility flip. Offline verification against a
-local checkout: `GVC_SPEC_BASE=/path/to/graded-verdict-custody node check-parity.mjs`.
+The spec repository is public, so the parity step runs green end to end;
+it still fails closed — an unreachable canonical artifact is a failure,
+never a pass. Offline verification against a local checkout:
+`GVC_SPEC_BASE=/path/to/graded-verdict-custody node check-parity.mjs`.
 
 ## Run
 

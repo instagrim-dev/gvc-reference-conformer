@@ -2,10 +2,14 @@
 // Independent GVC derivation implementation (JavaScript — shares no code
 // with the spec's Python reference runner) projected over the canonical
 // derivation fixtures. Implements spec/graded-verdict-custody.md section 5
-// (derivation and rank operations), section 6 (producer-mint prohibition),
-// and section 7 (counted populations). The grade vocabulary and its order
-// are read from the vendored registration artifact — the ladder is never
-// restated here.
+// (derivation, tied-set MAX, tie selection, rank operations), section 6
+// (producer-mint prohibition), section 7 (counted populations), and
+// section 8 (fail-closed admission). Fixture comparison follows the
+// section 9.2 posture: counted populations compare per canonical
+// population through a declared injective total mapping, never by
+// whole-structure equality. The grade vocabulary and its order are read
+// from the vendored registration artifact — the ladder is never restated
+// here.
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -24,7 +28,53 @@ const UNVERIFIED = "unverified";
 const PROOF = "proof";
 const CONSTRUCTED_CHECK = "constructed_check";
 
-// Ordinal strength; unknown values rank 0, below every member.
+// Section 9.2: canonical population identifiers — one per population named
+// in section 7. This implementation uses the canonical spellings directly,
+// so its declared mapping is the identity map: static, total over the
+// canonical identifiers, injective, declared once per implementation.
+const CANONICAL_POPULATIONS = [
+  "unverified_from_unrun_declared",
+  "degraded",
+  "producer_mint_rejected",
+  "unbindable_content_identity",
+  "same_chain_indeterminate",
+  "author_chain_unbound",
+  "failed_declared",
+  "proof_kernel_exempt",
+  "tied_uncap",
+];
+const POPULATION_MAPPING = Object.fromEntries(
+  CANONICAL_POPULATIONS.map((name) => [name, name]),
+);
+
+// Section 9.2 mapping obligations, asserted before any case runs: a
+// mapping that folds two canonical populations (non-injective) or leaves
+// one uncovered (non-total) is non-conformance by rule.
+function validateMapping() {
+  const problems = [];
+  const targets = Object.values(POPULATION_MAPPING);
+  const seen = new Set();
+  const folded = new Set();
+  for (const target of targets) {
+    if (seen.has(target)) folded.add(target);
+    seen.add(target);
+  }
+  if (folded.size > 0) {
+    problems.push(
+      `mapping folds canonical population(s) ${[...folded].sort().join(", ")} — not injective`,
+    );
+  }
+  const uncovered = CANONICAL_POPULATIONS.filter((name) => !seen.has(name));
+  if (uncovered.length > 0) {
+    problems.push(
+      `mapping does not cover canonical population(s) ${uncovered.join(", ")} — not total`,
+    );
+  }
+  return problems;
+}
+
+// Ordinal strength derived from the registration; unknown values rank 0,
+// strictly below every vocabulary member (section 2).
 function rank(grade) {
   const idx = ORDERED.indexOf(grade);
   return idx === -1 ? 0 : ORDERED.length - idx;
@@ -36,101 +86,207 @@ function oneTierBelow(grade) {
   return ORDERED[ORDERED.length - (r - 1)];
 }
 
-const chain = (role) => ((role?.chain_id ?? "").trim());
+const trimmed = (value) => (value ?? "").trim();
 
-function sameChainAgentAuthored(author, producer) {
-  if (author?.kind !== "agent") return false;
-  return chain(author) !== "" && chain(author) === chain(producer);
+// Section 5 step 3.1 chain classification — kind-free (the cap keys on
+// chain identity, not the author's kind): "same" when both chains are
+// non-empty and byte-equal; "unbound" when the author's chain is empty
+// (the normal chainless case, counted distinctly); "indeterminate" when
+// the admission-populated producer chain is empty; "different" otherwise.
+function chainRelation(author, producer) {
+  const authorChain = trimmed(author?.chain_id);
+  const producerChain = trimmed(producer?.chain_id);
+  if (authorChain === "") return "unbound";
+  if (producerChain === "") return "indeterminate";
+  return authorChain === producerChain ? "same" : "different";
 }
 
-function sameChainIndeterminate(author, producer) {
-  if (author?.kind !== "agent") return false;
-  return chain(author) === "" || chain(producer) === "";
+// Sections 2.1 and 5 step 3.1: proof escapes the same-chain cap only when
+// the base oracle's author kind is kernel.
+function kernelProofExempt(grade, author) {
+  return grade === PROOF && author?.kind === "kernel";
+}
+
+function newCounters() {
+  return Object.fromEntries(CANONICAL_POPULATIONS.map((name) => [name, 0]));
+}
+
+// Section 5 "Tied top tier": evaluate steps 2 through 3.3 for one tied-set
+// member as though it were the base oracle. Returns the member's surviving
+// grade, its applied operations, and the observability counts its path
+// produced.
+function evaluateMember(oracle, producer, unrunCount, conflict, currentIdentity) {
+  const counts = newCounters();
+  let grade = oracle.tier;
+  const author = oracle.author ?? {};
+  const content = trimmed(oracle.content_identity);
+  const ops = [];
+
+  // Step 2: unrun-declared cap — recorded and counted only when it lowers
+  // the grade; counted solely in its own population, never in degraded.
+  if (unrunCount > 0 && rank(grade) > rank(UNVERIFIED)) {
+    grade = UNVERIFIED;
+    ops.push("unrun_declared_cap");
+    counts.unverified_from_unrun_declared += 1;
+  }
+
+  // Step 3.1: chain-keyed same-chain cap; kernel-only proof exemption;
+  // empty chains counted (never guessed), and only when the cap would
+  // otherwise be in range.
+  const relation = chainRelation(author, producer);
+  const exempt = kernelProofExempt(grade, author);
+  const capInRange = rank(grade) > rank(CONSTRUCTED_CHECK) && !exempt;
+  if (capInRange) {
+    if (relation === "same") {
+      grade = CONSTRUCTED_CHECK;
+      ops.push("same_chain_cap");
+      counts.degraded += 1;
+    } else if (relation === "indeterminate") {
+      counts.same_chain_indeterminate += 1;
+    } else if (relation === "unbound") {
+      counts.author_chain_unbound += 1;
+    }
+  } else if (exempt && relation === "same") {
+    // Each kernel-kind proof exemption is counted so a relocated kind lie
+    // stays observable.
+    counts.proof_kernel_exempt += 1;
+  }
+
+  // Step 3.2: conflict demotion — ordinal, evidence kind retained;
+  // recorded and counted only when the demotion changed the grade.
+  if (conflict) {
+    const demoted = oneTierBelow(grade);
+    if (demoted !== grade) {
+      grade = demoted;
+      ops.push("conflict_demotion");
+      counts.degraded += 1;
+    }
+  }
+
+  // Step 3.3: staleness reversion; the unbindable population is counted
+  // only while the surviving grade still ranks above unverified.
+  if (
+    content !== "" &&
+    currentIdentity !== "" &&
+    content !== currentIdentity &&
+    rank(grade) > rank(UNVERIFIED)
+  ) {
+    grade = UNVERIFIED;
+    ops.push("staleness_reversion");
+    counts.degraded += 1;
+  } else if (
+    (content === "" || currentIdentity === "") &&
+    rank(grade) > rank(UNVERIFIED)
+  ) {
+    counts.unbindable_content_identity += 1;
+  }
+
+  return { grade, ops, counts };
 }
 
 function derive(input) {
-  const counters = {
-    unverified_from_unrun_declared: 0,
-    degraded: 0,
-    producer_mint_rejected: 0,
-    unbindable_content_identity: 0,
-    same_chain_indeterminate: 0,
-  };
+  const counters = newCounters();
   const producer = input.work_producer;
-  const currentIdentity = (input.current_content_identity ?? "").trim();
+  const currentIdentity = trimmed(input.current_content_identity);
 
-  // Step 1: base = highest tier among declared oracles that ran and passed.
-  let base = UNVERIFIED;
-  let baseAuthor = {};
-  let baseContent = "";
-  let unrun = 0;
-  for (const oracle of input.declared ?? []) {
-    if (!oracle.ran) {
-      unrun += 1;
-      continue;
+  // Section 8: a unit with no admission evidence surfaces as unverified
+  // with labeled provenance — never dropped.
+  if (input.admission_evidence === false) {
+    return {
+      record: {
+        effective_grade: UNVERIFIED,
+        evidence_kind: UNVERIFIED,
+        applied_rank_ops: [],
+        conflicting_evidence: false,
+        failed_declared_evidence: false,
+        provenance: "missing_admission_fact",
+        oracle_author: {},
+        oracle_runner: {},
+        work_producer: producer,
+      },
+      counters,
+    };
+  }
+
+  const declared = input.declared ?? [];
+  const unrunCount = declared.filter((o) => !o.ran).length;
+
+  // Section 5 "Ran-and-failed declared oracles": counted once per oracle
+  // that ran and did not pass; the record flag set when nonzero. Failure
+  // neither caps nor demotes.
+  const failed = declared.filter((o) => o.ran && !o.passed);
+  counters.failed_declared += failed.length;
+
+  // Step 1: base = rank-maximum over {unverified} and ran-and-passed
+  // tiers; the tied set is every passer at that maximum. Unknown tiers
+  // rank 0 and contribute nothing, so the base is always a member.
+  const passed = declared.filter((o) => o.ran && o.passed);
+  const baseRank = passed.reduce((max, o) => Math.max(max, rank(o.tier ?? "")), 0);
+  const tied = baseRank > 0 ? passed.filter((o) => rank(o.tier ?? "") === baseRank) : [];
+  const base = tied.length > 0 ? tied[0].tier : UNVERIFIED;
+
+  // Step 3.2 definition, derived here from the declared set (never
+  // caller-supplied): among declared oracles at the base tier, at least
+  // one ran and passed while at least one ran and did not pass.
+  const conflict = base !== UNVERIFIED && failed.some((o) => o.tier === base);
+
+  let grade = UNVERIFIED;
+  let ops = [];
+  let selected = null;
+  if (tied.length > 0) {
+    // Tied-set MAX: every step-3 predicate that depends on the base
+    // oracle is evaluated against every tied member, and the derivation
+    // keeps the most favorable surviving outcome. Tie selection: prefer a
+    // member that survives uncapped; among those (or among all, when none
+    // survives), the lexicographically least (author.identity,
+    // content_identity) pair. Sorting makes the result independent of
+    // declaration order.
+    const evaluations = tied.map((oracle) => ({
+      oracle,
+      outcome: evaluateMember(oracle, producer, unrunCount, conflict, currentIdentity),
+    }));
+    evaluations.sort((a, b) => {
+      const byGrade = rank(b.outcome.grade) - rank(a.outcome.grade);
+      if (byGrade !== 0) return byGrade;
+      const aKey = [trimmed(a.oracle.author?.identity), trimmed(a.oracle.content_identity)];
+      const bKey = [trimmed(b.oracle.author?.identity), trimmed(b.oracle.content_identity)];
+      if (aKey[0] !== bKey[0]) return aKey[0] < bKey[0] ? -1 : 1;
+      if (aKey[1] !== bKey[1]) return aKey[1] < bKey[1] ? -1 : 1;
+      return 0;
+    });
+    const winner = evaluations[0];
+    grade = winner.outcome.grade;
+    ops = winner.outcome.ops;
+    selected = winner.oracle;
+    // A capped fold records the capping operation once and an
+    // indeterminate question counts once per derivation: only the
+    // selected member's operations and counts land on the record.
+    for (const name of CANONICAL_POPULATIONS) {
+      counters[name] += winner.outcome.counts[name];
     }
-    if (oracle.passed && rank(oracle.tier ?? "") > rank(base)) {
-      base = oracle.tier;
-      baseAuthor = oracle.author ?? {};
-      baseContent = (oracle.content_identity ?? "").trim();
+    // Tied-uncap observability: the MAX left the record uncapped while at
+    // least one tied member would have been capped.
+    const anyMemberCapped = evaluations.some((ev) =>
+      ev.outcome.ops.includes("same_chain_cap"),
+    );
+    if (!ops.includes("same_chain_cap") && anyMemberCapped) {
+      counters.tied_uncap += 1;
     }
   }
 
   const record = {
-    effective_grade: base,
+    effective_grade: grade,
     evidence_kind: base,
-    applied_rank_ops: [],
-    conflicting_evidence: false,
+    applied_rank_ops: ops,
+    conflicting_evidence: conflict,
+    failed_declared_evidence: failed.length > 0,
+    oracle_author: selected ? selected.author ?? {} : {},
+    oracle_runner: selected ? selected.runner ?? {} : {},
+    work_producer: producer,
   };
 
-  // Step 2: unrun-declared cap.
-  if (unrun > 0 && rank(record.effective_grade) > rank(UNVERIFIED)) {
-    record.effective_grade = UNVERIFIED;
-    record.applied_rank_ops.push("unrun_declared_cap");
-    counters.unverified_from_unrun_declared += 1;
-  }
-
-  // Step 3.1: same-chain cap (proof exempt; indeterminate counted).
-  const aboveConstructed = () =>
-    record.effective_grade !== PROOF &&
-    rank(record.effective_grade) > rank(CONSTRUCTED_CHECK);
-  if (sameChainAgentAuthored(baseAuthor, producer) && aboveConstructed()) {
-    record.effective_grade = CONSTRUCTED_CHECK;
-    record.applied_rank_ops.push("same_chain_cap");
-    counters.degraded += 1;
-  } else if (sameChainIndeterminate(baseAuthor, producer) && aboveConstructed()) {
-    counters.same_chain_indeterminate += 1;
-  }
-
-  // Step 3.2: same-tier conflict demotion (ordinal, kind retained).
-  if (input.same_tier_conflict) {
-    record.conflicting_evidence = true;
-    const demoted = oneTierBelow(record.effective_grade);
-    if (demoted !== record.effective_grade) {
-      record.effective_grade = demoted;
-      record.applied_rank_ops.push("conflict_demotion");
-      counters.degraded += 1;
-    }
-  }
-
-  // Step 3.3: staleness reversion; unbindable counted.
-  if (
-    baseContent !== "" &&
-    currentIdentity !== "" &&
-    baseContent !== currentIdentity &&
-    rank(record.effective_grade) > rank(UNVERIFIED)
-  ) {
-    record.effective_grade = UNVERIFIED;
-    record.applied_rank_ops.push("staleness_reversion");
-    counters.degraded += 1;
-  } else if (
-    (baseContent === "" || currentIdentity === "") &&
-    rank(record.effective_grade) > rank(UNVERIFIED)
-  ) {
-    counters.unbindable_content_identity += 1;
-  }
-
-  // Section 6: producer-mint prohibition — derived governs.
+  // Section 6: producer-mint prohibition — the derived record governs in
+  // all cases; only a disagreeing mint increments the rejection count.
   const supplied = input.producer_supplied_grade;
   if (supplied !== undefined && supplied !== null && supplied !== record.effective_grade) {
     counters.producer_mint_rejected += 1;
@@ -153,6 +309,57 @@ function sortKeys(value) {
   return value;
 }
 
+// Section 9.2 keyed comparison: record fields compare strictly per
+// expected key; counted populations compare per canonical population
+// through the declared mapping. A population the expectation does not
+// name expects zero — absence is an expectation, not a skip. A canonical
+// population the mapping does not cover fails every case, fail-closed.
+function compareCase(record, counters, expected) {
+  const divergences = [];
+  for (const key of Object.keys(expected)) {
+    if (key === "counters") continue;
+    if (!deepEqual(record[key], expected[key])) {
+      divergences.push(
+        `${key}: expected ${JSON.stringify(expected[key])}, got ${JSON.stringify(record[key])}`,
+      );
+    }
+  }
+  const inverse = new Map(
+    Object.entries(POPULATION_MAPPING).map(([local, canonical]) => [canonical, local]),
+  );
+  const expectedCounters = expected.counters ?? {};
+  for (const canonical of CANONICAL_POPULATIONS) {
+    const want = expectedCounters[canonical] ?? 0;
+    const local = inverse.get(canonical);
+    if (local === undefined || !(local in counters)) {
+      divergences.push(
+        `counters[${canonical}]: canonical population unmapped by this implementation — failure, not a skip`,
+      );
+      continue;
+    }
+    const got = counters[local];
+    if (got !== want) {
+      divergences.push(`counters[${canonical}]: expected ${want}, got ${got}`);
+    }
+  }
+  const unknown = Object.keys(expectedCounters).filter(
+    (key) => !CANONICAL_POPULATIONS.includes(key),
+  );
+  if (unknown.length > 0) {
+    divergences.push(
+      `fixture expects unknown population(s) ${unknown.join(", ")} — not canonical`,
+    );
+  }
+  return divergences;
+}
+
+const mappingProblems = validateMapping();
+if (mappingProblems.length > 0) {
+  for (const problem of mappingProblems) {
+    console.log(`FAIL: population mapping: ${problem}`);
+  }
+  process.exit(2);
+}
 const cases = fixtures.cases;
 if (!cases || cases.length === 0) {
   console.log("FAIL: no fixture cases — the conformer cannot discriminate");
@@ -161,19 +368,15 @@ if (!cases || cases.length === 0) {
 let failures = 0;
 for (const testCase of cases) {
   const { record, counters } = derive(testCase.input);
-  const got = { ...record, counters };
-  if (deepEqual(got, testCase.expect)) {
+  const divergences = compareCase(record, counters, testCase.expect);
+  if (divergences.length === 0) {
     console.log(`  OK ${testCase.name}`);
     continue;
   }
   failures += 1;
   console.log(`  FAIL ${testCase.name}`);
-  for (const key of Object.keys(testCase.expect)) {
-    if (!deepEqual(testCase.expect[key], got[key])) {
-      console.log(
-        `    ${key}: expected ${JSON.stringify(testCase.expect[key])}, got ${JSON.stringify(got[key])}`,
-      );
-    }
+  for (const divergence of divergences) {
+    console.log(`    ${divergence}`);
   }
 }
 if (failures > 0) {

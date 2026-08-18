@@ -8,14 +8,5 @@
     "constructed_check",
     "review_only",
     "unverified"
-  ],
-  "span_vocabulary": [
-    "proof",
-    "known_answer",
-    "interop",
-    "constructed_check",
-    "review_only",
-    "unverified"
-  ],
-  "span_unclassified_label": "unclassified"
+  ]
 }
