@@ -14,6 +14,12 @@ public CI, the two conformance obligations the spec defines:
    executes every canonical derivation fixture and must match every
    expected outcome (`conformer.mjs`).
 
+**Pre-publication state:** while the spec repository is private, the parity
+step fails closed in CI (HTTP 404 on the canonical artifacts) by design — a
+parity check that passes when it cannot see the producer certifies nothing.
+It goes green at the spec's visibility flip. Offline verification against a
+local checkout: `GVC_SPEC_BASE=/path/to/graded-verdict-custody node check-parity.mjs`.
+
 ## Run
 
 ```sh
